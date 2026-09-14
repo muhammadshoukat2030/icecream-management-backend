@@ -16,7 +16,7 @@ const app = express();
 const allowedOrigins = [
     "http://127.0.0.1:5501",
     "http://localhost:5501",
-    "https://icecream-management-frontend.vercel.app"
+    "https://icecream-management-opal.vercel.app",
 ];
 
 app.use(cors({
@@ -583,6 +583,157 @@ app.get("/suppliers",authController.protect, async(req,res)=>{
 });
 
 
+// =========================================================
+// GET INVOICES
+// Initial load + lightweight refresh
+// =========================================================
+
+app.get(
+    "/invoices",
+    authController.protect,
+    async (req, res) => {
+
+        try {
+
+            const { limit, since } = req.query;
+
+            // =================================================
+            // BASE QUERY
+            // =================================================
+ 
+            const query = {};
+
+
+            // =================================================
+            // INCREMENTAL SYNC
+            //
+            // Example:
+            // /invoices?since=2026-09-13T10:30:00.000Z
+            // =================================================
+
+            if (since) {
+
+                const sinceDate =
+                    new Date(since);
+
+
+                if (
+                    Number.isNaN(
+                        sinceDate.getTime()
+                    )
+                ) {
+
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            "Invalid since date."
+                    });
+
+                }
+
+
+                query.date = {
+                    $gt: sinceDate
+                };
+
+            }
+
+
+            // =================================================
+            // QUERY DATABASE
+            // =================================================
+
+            let invoiceQuery =
+                dbInvoice
+                    .find(query)
+                    .sort({
+                        date: -1,
+                        id: -1
+                    });
+
+
+            // =================================================
+            // LIMIT
+            //
+            // No limit = all invoices
+            // limit=10 = latest 10
+            // =================================================
+
+            if (limit) {
+
+                const parsedLimit =
+                    Number(limit);
+
+
+                if (
+                    !Number.isInteger(
+                        parsedLimit
+                    ) ||
+                    parsedLimit < 1
+                ) {
+
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            "limit must be a positive integer."
+                    });
+
+                }
+
+
+                invoiceQuery =
+                    invoiceQuery.limit(
+                        parsedLimit
+                    );
+
+            }
+
+
+            const invoices =
+                await invoiceQuery;
+
+
+            // =================================================
+            // RESPONSE
+            // =================================================
+
+            return res.status(200).json({
+
+                success: true,
+
+                count:
+                    invoices.length,
+
+                invoices
+
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "Get invoices error:",
+                error
+            );
+
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    "Failed to fetch invoices."
+
+            });
+
+        }
+
+    }
+);
+
+
+
+
 //upload invoice
 app.post("/invoices",authController.protect, async (req, res) => {
 
@@ -1096,7 +1247,45 @@ app.put("/products/:id",authController.protect,async (req, res) => {
 
         }
 
+      const  findProduct=await dbProduct.findOne({
+        id:id
+      })
+if(findProduct.category!==category){
+    await dbCategories.findOneAndUpdate({name:findProduct.category},{
+        $inc:{
+            totalProducts:-1
+        }
+    })
+await dbCategories.findOneAndUpdate({
+   name:category
+},
+{
+    $inc:{
+        totalProducts:+1
+    }
+}
+)
 
+
+
+}
+
+if(findProduct.company!==company){
+    await dbSuppliers.findOneAndUpdate({name:company},{
+        $inc:{
+            totalProducts:+1
+        }
+    })
+    await dbSuppliers.findOneAndUpdate({
+        name:findProduct.company
+    },
+    {
+        $inc:{
+            totalProducts:-1
+        }
+    }
+)
+}
         const updatedProduct =
             await dbProduct.findOneAndUpdate(
 
@@ -1192,7 +1381,7 @@ app.delete("/products/:id",authController.protect,async (req, res) => {
 
          
  const find=deletedProduct.category;
- const updated =await dbCategories.updateMany({find},{
+ const updated =await dbCategories.updateMany({name:find},{
     
         $inc:{
         totalProducts:-1
@@ -1269,395 +1458,550 @@ todayInvoices.forEach((invoice)=>{
 });
 
 })
-app.put("/invoice/:id/update-last",authController.protect,async (req, res) => {
 
-    try {
+app.put(
+    "/invoice/:id/update-last",
+    authController.protect,
+    async (req, res) => {
 
-        const invoiceId = Number(req.params.id);
+        try {
 
-        const {
-            items,
-            cash
-        } = req.body;
+            const invoiceId = Number(req.params.id);
+
+            const {
+                items,
+                cash
+            } = req.body;
 
 
-        // ----------------------------------------
-        // Find invoice
-        // ----------------------------------------
+            // ========================================
+            // 1. FIND INVOICE
+            // ========================================
 
-        const invoice = await dbInvoice.findOne({
-            id: invoiceId
-        });
-
-        if (!invoice) {
-
-            return res.status(404).json({
-                message: "Invoice not found"
+            const invoice = await dbInvoice.findOne({
+                id: invoiceId
             });
 
-        }
+            if (!invoice) {
 
-
-        // ----------------------------------------
-        // Only salesman invoices
-        // ----------------------------------------
-
-        if (invoice.type !== "salesman") {
-
-            return res.status(400).json({
-                message: "Only salesman invoices can be edited"
-            });
-
-        }
-
-
-        // ----------------------------------------
-        // Find latest invoice of this salesman
-        // ----------------------------------------
-
-        const latestInvoice = await dbInvoice
-            .findOne({
-                type: "salesman",
-                partyId: invoice.partyId
-            })
-            .sort({
-                date: -1,
-                id: -1 
-            });
-
-
-        if (!latestInvoice) {
-
-            return res.status(404).json({
-                message: "Latest invoice not found"
-            });
-
-        }
-
-
-        // ----------------------------------------
-        // SECURITY CHECK
-        // ----------------------------------------
-
-        if (latestInvoice.id !== invoice.id) {
-
-            return res.status(400).json({
-                message:
-                    "Only the most recent invoice can be edited"
-            });
-
-        }
-
-
-        // ----------------------------------------
-        // Validate cash
-        // ----------------------------------------
-
-        const newCash = Math.max(
-            Number(cash || 0),
-            0
-        );
-
-
-        // ----------------------------------------
-        // Recalculate items
-        // ----------------------------------------
-
-                let subtotal = 0;
-        let nonCommissionableAmount = 0; // NEW
-
-
-        const updatedItems = invoice.items.map(
-            (oldItem, index) => {
-
-                const submittedItem =
-                    items?.find(
-                        item =>
-                            Number(item.productId) ===
-                            Number(oldItem.productId)
-                    );
-
-
-                let returnQuantity =
-                    Number(
-                        submittedItem?.returnQuantity ??
-                        oldItem.returnQuantity ??
-                        0
-                    );
-
-
-                const quantity =
-                    Number(oldItem.quantity || 0);
-
-
-                // Cannot return more than sold
-                if (returnQuantity < 0) {
-                    returnQuantity = 0;
-                }
-
-
-                if (returnQuantity > quantity) {
-                    returnQuantity = quantity;
-                }
-
-
-                const netQuantity =
-                    quantity - returnQuantity;
-
-
-                const amount =
-                    netQuantity *
-                    Number(oldItem.price || 0);
-
-
-                subtotal += amount;
-
-                // NEW: track non-commissionable amount
-                if (oldItem.commissionApplicable === "no") {
-                    nonCommissionableAmount += amount;
-                }
-
-
-                return {
-
-                    productId:
-                        oldItem.productId,
-
-                    productName:
-                        oldItem.productName,
-
-                    quantity:
-                        quantity,
-
-                    price:
-                        Number(oldItem.price || 0),
-
-                    returnQuantity:
-                        returnQuantity,
-
-                    amount:
-                        amount,
-
-                    commissionApplicable:   // NEW — preserve this field
-                        oldItem.commissionApplicable,
-                        
-                };
+                return res.status(404).json({
+                    message: "Invoice not found"
+                });
 
             }
-        );
-
-// console.log('updated items:',updatedItems)
-        // ----------------------------------------
-        // COMMISSION
-        // ----------------------------------------
-
-        const commissionableAmount =            // NEW
-            Math.max(subtotal - nonCommissionableAmount, 0);
-
-        const commission =
-            commissionableAmount * 0.20;          // CHANGED
-
-        // ----------------------------------------
-        // DISCOUNT
-        // ----------------------------------------
-
-        /*
-         * If discount is a fixed amount that
-         * should remain unchanged:
-         */
-
-        const discount =
-            Number(invoice.discount || 0);
 
 
-        // ----------------------------------------
-        // NET TOTAL
-        // ----------------------------------------
+            // ========================================
+            // 2. ONLY SALESMAN / SUPPLIER INVOICES
+            // ========================================
 
-        const netTotal =
-            subtotal -
-            commission -
-            discount;
+            if (
+                invoice.type !== "salesman" &&
+                invoice.type !== "supplier"
+            ) {
 
+                return res.status(400).json({
+                    message:
+                        "Only salesman or supplier invoices can be edited"
+                });
 
-        // ----------------------------------------
-        // CURRENT BILL
-        // ----------------------------------------
-
-        const currentBill =
-            netTotal -
-            newCash;
-
-
-        // ----------------------------------------
-        // ARREARS
-        // ----------------------------------------
-
-        const arrears =
-            Number(invoice.arrears || 0);
-
-
-        // ----------------------------------------
-        // BALANCE
-        // ----------------------------------------
-
-        const balance =
-            currentBill +
-            arrears;
-
-
-        // ----------------------------------------
-        // SAVE
-        // ----------------------------------------
-
-        invoice.items =
-            updatedItems;
-
-        invoice.subtotal =
-            subtotal;
-
-        invoice.commission =
-            commission;
-
-        invoice.discount =
-            discount;
-
-        invoice.netTotal =
-            netTotal;
-
-        invoice.cash =
-            newCash;
-
-        invoice.balance =
-            balance;
-
-        invoice.arrears =
-            arrears;
-
-
-        await invoice.save();
-        
-   
-  for (const item of invoice.items) {
-    const getProduct = await dbProduct.findOne({
-        id: item.productId
-    });
-    if (!getProduct) {
-        console.log("Product not found:", item.productId);
-        continue;
-    }
-    await dbProduct.findOneAndUpdate(
-        {
-            id: item.productId
-        },
-        {
-            $inc: {
-                qunatity: item.returnQuantity - getProduct.lastReturn
-            },
-            $set: {
-                lastReturn: item.returnQuantity
             }
-        }
-    );
-}
-         // =========================================
-        // 5. UPDATE SALESMAN BALANCE
-        // =========================================
 
-        if (invoice.type === "salesman") {
 
-            const updatedSalesman =
-                await dbSalesman.findOneAndUpdate(
+            // ========================================
+            // 3. FIND LATEST INVOICE FOR THIS PARTY
+            // ========================================
 
-                    {
-                        id: Number(invoice.partyId)
-                    },
+            const latestInvoice = await dbInvoice
+                .findOne({
+                    type: invoice.type,
+                    partyId: Number(invoice.partyId)
+                })
+                .sort({
+                    date: -1,
+                    id: -1
+                });
 
-                    {
-                        $set: {
-                            outstandingBalance:
-                                Number(invoice.balance)
-                        }
-                    },
 
-                    {
-                        new: true
+            if (!latestInvoice) {
+
+                return res.status(404).json({
+                    message: "Latest invoice not found"
+                });
+
+            }
+
+
+            // ========================================
+            // 4. SECURITY CHECK
+            // ONLY LATEST INVOICE CAN BE EDITED
+            // ========================================
+
+            if (
+                Number(latestInvoice.id) !==
+                Number(invoice.id)
+            ) {
+
+                return res.status(400).json({
+                    message:
+                        "Only the most recent invoice can be edited"
+                });
+
+            }
+
+
+            // ========================================
+            // 5. CASH
+            // ========================================
+
+            const newCash = Math.max(
+                Number(cash || 0),
+                0
+            );
+
+
+            // ========================================
+            // 6. RECALCULATE ITEMS
+            // ========================================
+
+            let subtotal = 0;
+
+            let nonCommissionableAmount = 0;
+
+            const oldItems = Array.isArray(invoice.items)
+                ? invoice.items
+                : [];
+
+            const submittedItems =
+                Array.isArray(items)
+                    ? items
+                    : [];
+
+
+            const updatedItems = oldItems.map(
+                (oldItem) => {
+
+                    // Find edited item
+                    const submittedItem =
+                        submittedItems.find(
+                            item =>
+                                Number(item.productId) ===
+                                Number(oldItem.productId)
+                        );
+
+
+                    // --------------------------------
+                    // RETURN QUANTITY
+                    // --------------------------------
+
+                    let returnQuantity =
+                        Number(
+                            submittedItem?.returnQuantity ??
+                            oldItem.returnQuantity ??
+                            0
+                        );
+
+
+                    const quantity =
+                        Number(oldItem.quantity || 0);
+
+
+                    // Cannot be negative
+                    if (returnQuantity < 0) {
+                        returnQuantity = 0;
                     }
 
+
+                    // Cannot exceed purchased quantity
+                    if (returnQuantity > quantity) {
+                        returnQuantity = quantity;
+                    }
+
+
+                    // --------------------------------
+                    // NET QUANTITY
+                    // --------------------------------
+
+                    const netQuantity =
+                        quantity -
+                        returnQuantity;
+
+
+                    // --------------------------------
+                    // AMOUNT
+                    // --------------------------------
+
+                    const price =
+                        Number(oldItem.price || 0);
+
+                    const amount =
+                        netQuantity *
+                        price;
+
+
+                    subtotal += amount;
+
+
+                    // --------------------------------
+                    // COMMISSIONABLE
+                    // --------------------------------
+
+                    if (
+                        oldItem.commissionApplicable === "no"
+                    ) {
+
+                        nonCommissionableAmount +=
+                            amount;
+
+                    }
+
+
+                    // --------------------------------
+                    // RETURN UPDATED ITEM
+                    // --------------------------------
+
+                    return {
+
+                        productId:
+                            oldItem.productId,
+
+                        productName:
+                            oldItem.productName,
+
+                        quantity:
+                            quantity,
+
+                        price:
+                            price,
+
+                        returnQuantity:
+                            returnQuantity,
+
+                        amount:
+                            amount,
+
+                        commissionApplicable:
+                            oldItem.commissionApplicable
+
+                    };
+
+                }
+            );
+
+
+            // ========================================
+            // 7. COMMISSION
+            // ========================================
+
+            const commissionableAmount =
+                Math.max(
+                    subtotal -
+                    nonCommissionableAmount,
+                    0
                 );
 
 
-            console.log(
-                "Updated salesman:",
-                updatedSalesman
+            /*
+             * Keeping your existing calculation:
+             * dynamicComission commission.
+             */
+            const commission =
+                commissionableAmount *Number(invoice.dynamicComission);
+
+
+            // ========================================
+            // 8. DISCOUNT
+            // ========================================
+
+            const discount =
+                Number(invoice.discount || 0);
+
+
+            // ========================================
+            // 9. NET TOTAL
+            // ========================================
+
+            const netTotal =
+                subtotal -
+                commission -
+                discount;
+
+
+            // ========================================
+            // 10. CURRENT BILL
+            // ========================================
+
+            const currentBill =
+                netTotal -
+                newCash;
+
+
+            // ========================================
+            // 11. ARREARS
+            // ========================================
+
+            const arrears =
+                Number(invoice.arrears || 0);
+
+
+            // ========================================
+            // 12. BALANCE
+            // ========================================
+
+            const balance =
+                currentBill +
+                arrears;
+
+
+            // ========================================
+            // 13. UPDATE INVOICE
+            // ========================================
+
+            invoice.items =
+                updatedItems;
+
+            invoice.subtotal =
+                subtotal;
+
+            invoice.commission =
+                commission;
+
+            invoice.discount =
+                discount;
+
+            invoice.netTotal =
+                netTotal;
+
+            invoice.cash =
+                newCash;
+
+            invoice.balance =
+                balance;
+
+            invoice.arrears =
+                arrears;
+
+
+            await invoice.save();
+
+
+            // ========================================
+            // 14. UPDATE STOCK
+            //
+            // NEW RETURN - OLD RETURN
+            //
+            // Example:
+            // oldReturn = 2
+            // newReturn = 5
+            // stock += 3
+            //
+            // oldReturn = 5
+            // newReturn = 2
+            // stock -= 3
+            // ========================================
+
+            for (const item of invoice.items) {
+
+                const product =
+                    await dbProduct.findOne({
+                        id: item.productId
+                    });
+
+
+                if (!product) {
+
+                    console.log(
+                        "Product not found:",
+                        item.productId
+                    );
+
+                    continue;
+                }
+
+
+                const oldReturn =
+                    Number(product.lastReturn || 0);
+
+                const newReturn =
+                    Number(item.returnQuantity || 0);
+
+
+                let stockDifference;
+                console.log(invoice.type)
+                if(invoice.type=="supplier"){
+                      stockDifference = oldReturn - newReturn;
+                }else{
+                      stockDifference =
+                    newReturn -
+                    oldReturn;
+                }
+
+                if (stockDifference !== 0) {
+
+                    await dbProduct.findOneAndUpdate(
+                        {
+                            id: item.productId
+                        },
+                        {
+                            $inc: {
+                                qunatity:
+                                    stockDifference
+                            },
+
+                            $set: {
+                                lastReturn:
+                                    newReturn
+                            }
+                        }
+                    );
+
+                } else {
+
+                    /*
+                     * Still keep lastReturn synchronized.
+                     */
+                    await dbProduct.findOneAndUpdate(
+                        {
+                            id: item.productId
+                        },
+                        {
+                            $set: {
+                                lastReturn:
+                                    newReturn
+                            }
+                        }
+                    );
+
+                }
+
+            }
+
+
+            // ========================================
+            // 15. UPDATE PARTY BALANCE
+            // ========================================
+
+            if (
+                invoice.type === "salesman"
+            ) {
+
+                const updatedSalesman =
+                    await dbSalesman.findOneAndUpdate(
+
+                        {
+                            id:
+                                Number(invoice.partyId)
+                        },
+
+                        {
+                            $set: {
+                                outstandingBalance:
+                                    Number(invoice.balance)
+                            }
+                        },
+
+                        {
+                            new: true
+                        }
+
+                    );
+
+
+                console.log(
+                    "Updated salesman:",
+                    updatedSalesman
+                );
+
+            }
+
+
+            if (
+                invoice.type === "supplier"
+            ) {
+
+                const updatedSupplier =
+                    await dbSuppliers.findOneAndUpdate(
+
+                        {
+                            id:
+                                Number(invoice.partyId)
+                        },
+
+                        {
+                            $set: {
+                                outstandingBalance:
+                                    Number(invoice.balance)
+                            }
+                        },
+
+                        {
+                            new: true
+                        }
+
+                    );
+
+
+                console.log(
+                    "Updated supplier:",
+                    updatedSupplier
+                );
+                 console.log("invoice:",invoice.dynamicComission)
+        console.log("latestInvoice",latestInvoice.dynamicComission);
+
+            }
+
+
+            // ========================================
+            // 16. RESPONSE
+            // ========================================
+
+            return res.json({
+
+                message:
+                    "Invoice updated successfully",
+
+                invoice
+
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "Update invoice error:",
+                error
             );
 
+            return res.status(500).json({
+
+                message:
+                    "Unable to update invoice",
+
+                error:
+                    error.message
+
+            });
+
         }
-
-        if(invoice.type==='supplier'){
-            const updatedSupplier=await dbSuppliers.findOneAndUpdate(
-                     {
-                        id: Number(invoice.partyId)
-                    },
-
-                    {
-                        $set: {
-                            outstandingBalance:
-                                Number(invoice.balance)
-                        }
-                    },
-
-                    {
-                        new: true
-                    }
-            )
-        }
-
-
-        // ----------------------------------------
-        // RESPONSE
-        // ----------------------------------------
-
-        res.json({
-
-            message:
-                "Invoice updated successfully",
-
-            invoice
-
-        });
-
-
-    } catch (error) {
-
-        console.error(
-            "Update invoice error:",
-            error
-        );
-
-        res.status(500).json({
-
-            message:
-                "Unable to update invoice",
-
-            error:
-                error.message
-
-        });
+       
 
     }
-
-});
-app.get("/salesman/:salesmanId/latest-invoice",authController.protect,async (req, res) => {
-
+);
+app.get("/salesman/:salesmanId/latest-invoice", authController.protect, async (req, res) => {
     try {
+        const partyId = Number(req.params.salesmanId);
+        const type = req.query.type;
 
-        const salesmanId = Number(req.params.salesmanId);
+        if (!["salesman", "supplier"].includes(type)) {
+            return res.status(400).json({
+                message: "Invalid party type"
+            });
+        }
 
         const latestInvoice = await dbInvoice
             .findOne({
-                type: "salesman",
-                partyId: salesmanId
+                type: type,
+                partyId: partyId
             })
             .sort({
                 date: -1,
@@ -1665,28 +2009,20 @@ app.get("/salesman/:salesmanId/latest-invoice",authController.protect,async (req
             });
 
         if (!latestInvoice) {
-
             return res.status(404).json({
-                message: "No invoice found for this salesman"
+                message: `No invoice found for this ${type}`
             });
-
         }
 
         res.json(latestInvoice);
 
     } catch (error) {
-
-        console.error(
-            "Latest invoice error:",
-            error
-        );
+        console.error("Latest invoice error:", error);
 
         res.status(500).json({
             message: "Unable to fetch latest invoice"
         });
-
     }
-
 });
 
 app.get("/suppliers/recent-invoices",authController.protect,async (req, res) => {
